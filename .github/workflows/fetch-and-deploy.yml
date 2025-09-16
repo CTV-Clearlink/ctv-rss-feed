@@ -3,14 +3,14 @@ name: Fetch & Deploy SmartNews Feed
 on:
   schedule:
     - cron: "*/30 * * * *"      # every 30 minutes
-  workflow_dispatch:             # allow manual run
+  workflow_dispatch:
   push:
     branches: [ main ]
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
+  pages: write          # REQUIRED for Pages
+  id-token: write       # REQUIRED for Pages OIDC
 
 jobs:
   build-and-deploy:
@@ -25,53 +25,33 @@ jobs:
           sudo apt-get update -y
           sudo apt-get install -y --no-install-recommends libxml2-utils
 
-      # ---- FETCH WITH FULL DEBUG ----
-      - name: Fetch CableTV feed with full diagnostics
+      # ---- FETCH WITH DIAGNOSTICS ----
+      - name: Fetch CableTV feed
         env:
           FEED_URL: https://rss.app/feeds/IPTSK5jPaETkAX2v.xml
         run: |
           set -euxo pipefail
           echo "Fetching: $FEED_URL"
-          # Fetch headers + body separately so we can inspect
           curl -sS -D headers.txt -o smartnews-source.xml \
             -A "Mozilla/5.0 (GitHubActions; +https://github.com/actions)" \
             -H "Accept: application/rss+xml, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.1" \
             -L --max-redirs 5 --retry 3 --retry-delay 5 "$FEED_URL"
-          echo "---- Response headers ----"
-          cat headers.txt || true
-          echo "---- File size (bytes) ----"
-          wc -c smartnews-source.xml || true
-          echo "---- First 200 bytes ----"
-          head -c 200 smartnews-source.xml | sed 's/</\&lt;/g' || true
-
-          # Basic sanity: non-empty file
+          echo "---- Response headers ----"; cat headers.txt || true
+          echo "---- File size (bytes) ----"; wc -c smartnews-source.xml || true
+          echo "---- First 200 bytes ----"; head -c 200 smartnews-source.xml | sed 's/</\&lt;/g' || true
           test -s smartnews-source.xml
 
-          # Content-Type sanity (warn if not XML-like)
-          if ! grep -iE '^content-type:.*(xml|rss)' headers.txt > /dev/null; then
-            echo "::warning ::Content-Type is not XML/RSS. Proceeding to structural checks anyway."
-          fi
-
-      # ---- VALIDATE IT'S REAL XML (NOT HTML/CHALLENGE PAGE) ----
+      # ---- VALIDATE IT'S REAL XML ----
       - name: Validate XML (fail if HTML or not well-formed)
         run: |
           set -euxo pipefail
-          # Fast guard: if it looks like HTML, bail with a clear error
           if head -c 400 smartnews-source.xml | grep -qiE '<!doctype html|<html'; then
-            echo "::error ::Downloaded content looks like HTML, not RSS XML. Check FEED_URL or upstream protection."
-            exit 2
+            echo "::error ::Downloaded content looks like HTML, not RSS XML. Check FEED_URL."; exit 2
           fi
-          # Well-formedness check
           xmllint --noout smartnews-source.xml
 
-      # ---- PAGES ENABLEMENT & DEPLOY ----
-      - name: Configure Pages (enable if needed)
-        uses: actions/configure-pages@v5
-        with:
-          enablement: true
-
-      # Add a minimal index and .nojekyll at deploy time if they don't exist
-      - name: Ensure index.html and .nojekyll exist
+      # Ensure index and .nojekyll exist (served by Pages)
+      - name: Ensure index & .nojekyll
         run: |
           if [ ! -f index.html ]; then
             cat > index.html <<'HTML'
@@ -84,10 +64,14 @@ jobs:
           touch .nojekyll
           ls -la
 
-      - name: Upload artifact (repo root)
+      # Configure Pages (no enablement flag)
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      # Upload & deploy repo root (includes XML + index + .nojekyll)
+      - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
           path: "."
-
       - name: Deploy to Pages
         uses: actions/deploy-pages@v4
