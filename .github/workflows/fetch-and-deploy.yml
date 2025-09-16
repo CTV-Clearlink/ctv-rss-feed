@@ -3,7 +3,7 @@ name: Fetch & Deploy SmartNews Feed
 on:
   schedule:
     - cron: "*/30 * * * *"      # every 30 minutes
-  workflow_dispatch:
+  workflow_dispatch:             # allow manual run
   push:
     branches: [ main ]
 
@@ -20,51 +20,74 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install XML tools
+      - name: Install XML tools (xmllint)
         run: |
-          sudo apt-get update
+          sudo apt-get update -y
           sudo apt-get install -y --no-install-recommends libxml2-utils
 
-      # 🔁 FETCH the source feed
-      - name: Fetch source RSS
+      # ---- FETCH WITH FULL DEBUG ----
+      - name: Fetch CableTV feed with full diagnostics
         env:
-          FEED_URL: YOUR_SOURCE_RSS_URL_HERE
+          FEED_URL: https://rss.app/feeds/IPTSK5jPaETkAX2v.xml
         run: |
           set -euxo pipefail
-          for i in 1 2 3; do
-            curl -L --fail -A "Mozilla/5.0 (GitHubActions)" \
-              "$FEED_URL" -o smartnews-source.xml && break
-            echo "Retrying in 10s..."; sleep 10
-          done
+          echo "Fetching: $FEED_URL"
+          # Fetch headers + body separately so we can inspect
+          curl -sS -D headers.txt -o smartnews-source.xml \
+            -A "Mozilla/5.0 (GitHubActions; +https://github.com/actions)" \
+            -H "Accept: application/rss+xml, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.1" \
+            -L --max-redirs 5 --retry 3 --retry-delay 5 "$FEED_URL"
+          echo "---- Response headers ----"
+          cat headers.txt || true
+          echo "---- File size (bytes) ----"
+          wc -c smartnews-source.xml || true
+          echo "---- First 200 bytes ----"
+          head -c 200 smartnews-source.xml | sed 's/</\&lt;/g' || true
+
+          # Basic sanity: non-empty file
           test -s smartnews-source.xml
 
-      # ✅ VALIDATE it is XML (NOT HTML). Fail fast if not valid XML.
-      - name: Validate XML (fail if HTML or invalid)
-        run: |
-          head -c 200 smartnews-source.xml || true
-          # quick HTML guard: error out if it looks like HTML
-          if head -c 200 smartnews-source.xml | grep -qiE '<!doctype html|<html'; then
-            echo "::error ::Downloaded file looks like HTML, not RSS XML. Check FEED_URL."; exit 1
+          # Content-Type sanity (warn if not XML-like)
+          if ! grep -iE '^content-type:.*(xml|rss)' headers.txt > /dev/null; then
+            echo "::warning ::Content-Type is not XML/RSS. Proceeding to structural checks anyway."
           fi
-          # XML well-formedness check
+
+      # ---- VALIDATE IT'S REAL XML (NOT HTML/CHALLENGE PAGE) ----
+      - name: Validate XML (fail if HTML or not well-formed)
+        run: |
+          set -euxo pipefail
+          # Fast guard: if it looks like HTML, bail with a clear error
+          if head -c 400 smartnews-source.xml | grep -qiE '<!doctype html|<html'; then
+            echo "::error ::Downloaded content looks like HTML, not RSS XML. Check FEED_URL or upstream protection."
+            exit 2
+          fi
+          # Well-formedness check
           xmllint --noout smartnews-source.xml
 
-      # (Optional) Show size for sanity
-      - name: Show XML size
-        run: wc -c smartnews-source.xml
-
-      # 🟢 ENABLE & CONFIGURE PAGES
-      - name: Configure Pages
+      # ---- PAGES ENABLEMENT & DEPLOY ----
+      - name: Configure Pages (enable if needed)
         uses: actions/configure-pages@v5
         with:
           enablement: true
 
-      # 📦 UPLOAD site (repo root: includes index.html, .nojekyll, XML)
-      - name: Upload artifact
+      # Add a minimal index and .nojekyll at deploy time if they don't exist
+      - name: Ensure index.html and .nojekyll exist
+        run: |
+          if [ ! -f index.html ]; then
+            cat > index.html <<'HTML'
+          <!doctype html>
+          <html><head><meta charset="utf-8"><title>CableTV SmartNews Feed</title></head>
+          <body><h1>CableTV SmartNews Feed</h1>
+          <p><a href="smartnews-source.xml">Open smartnews-source.xml</a></p></body></html>
+          HTML
+          fi
+          touch .nojekyll
+          ls -la
+
+      - name: Upload artifact (repo root)
         uses: actions/upload-pages-artifact@v3
         with:
           path: "."
 
-      # 🚀 DEPLOY to Pages
       - name: Deploy to Pages
         uses: actions/deploy-pages@v4
