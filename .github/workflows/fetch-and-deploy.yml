@@ -1,0 +1,70 @@
+name: Fetch & Deploy SmartNews Feed
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"      # every 30 minutes
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  build-and-deploy:
+    environment:
+      name: github-pages
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install XML tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libxml2-utils
+
+      # 🔁 FETCH the source feed
+      - name: Fetch source RSS
+        env:
+          FEED_URL: YOUR_SOURCE_RSS_URL_HERE
+        run: |
+          set -euxo pipefail
+          for i in 1 2 3; do
+            curl -L --fail -A "Mozilla/5.0 (GitHubActions)" \
+              "$FEED_URL" -o smartnews-source.xml && break
+            echo "Retrying in 10s..."; sleep 10
+          done
+          test -s smartnews-source.xml
+
+      # ✅ VALIDATE it is XML (NOT HTML). Fail fast if not valid XML.
+      - name: Validate XML (fail if HTML or invalid)
+        run: |
+          head -c 200 smartnews-source.xml || true
+          # quick HTML guard: error out if it looks like HTML
+          if head -c 200 smartnews-source.xml | grep -qiE '<!doctype html|<html'; then
+            echo "::error ::Downloaded file looks like HTML, not RSS XML. Check FEED_URL."; exit 1
+          fi
+          # XML well-formedness check
+          xmllint --noout smartnews-source.xml
+
+      # (Optional) Show size for sanity
+      - name: Show XML size
+        run: wc -c smartnews-source.xml
+
+      # 🟢 ENABLE & CONFIGURE PAGES
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+        with:
+          enablement: true
+
+      # 📦 UPLOAD site (repo root: includes index.html, .nojekyll, XML)
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: "."
+
+      # 🚀 DEPLOY to Pages
+      - name: Deploy to Pages
+        uses: actions/deploy-pages@v4
